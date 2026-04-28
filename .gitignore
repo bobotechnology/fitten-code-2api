@@ -1,0 +1,21 @@
+node_modules/
+.env
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+.workbuddy/
+.playwright-cli/
+
+# Fitten Code 扩展文件（下载的 VSCode 扩展）
+FittenTech.Fitten-Code-*/
+*.vsix
+
+# 测试资源文件
+test-assets/
+
+# 临时测试文件
+test-*.js
+!test-agent-mode.js

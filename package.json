@@ -1,0 +1,50 @@
+{
+  "name": "fitten-code-2api",
+  "version": "1.0.0",
+  "description": "Convert Fitten Code API requests into standard OpenAI API format.",
+  "license": "MIT",
+  "author": "bobotechnology",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bobotechnology/fitten-code-2api.git"
+  },
+  "keywords": [
+    "fitten",
+    "openai",
+    "proxy",
+    "chat-completions",
+    "function-calling"
+  ],
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "node --test tests/tool-calling.partial-intent.test.js",
+
+    "check:proxy": "node scripts/check-proxy.js",
+    "check:stream": "node scripts/check-stream.js",
+    "check:refresh": "node scripts/check-refresh.js",
+    "check:content-array": "node scripts/check-content-array.js",
+    "check:markdown": "node scripts/check-markdown.js",
+    "check:newlines": "node scripts/check-newlines.js",
+    "check:errors": "node scripts/check-errors.js",
+    "check:sdk-stream": "node scripts/check-sdk-stream.js",
+    "check:image-input": "node scripts/check-image-input.js",
+    "check:image-stream": "node scripts/check-image-stream.js",
+    "check:image-cleanup": "node scripts/check-image-cleanup.js",
+    "check:image-boundaries": "node scripts/check-image-boundaries.js",
+    "check:all": "npm run check:proxy && npm run check:stream && npm run check:refresh && npm run check:content-array && npm run check:markdown && npm run check:newlines && npm run check:errors && npm run check:sdk-stream && npm run check:image-input && npm run check:image-stream && npm run check:image-cleanup && npm run check:image-boundaries"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "openai": "^6.34.0",
+    "supertest": "^7.2.2"
+  }
+}
