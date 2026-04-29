@@ -2,7 +2,7 @@ require('dotenv').config({ quiet: true });
 
 const express = require('express');
 const crypto = require('crypto');
-const { normalizeError } = require('./src/errors');
+const { normalizeError, createHttpError } = require('./src/errors');
 const { FITTEN_BASE_URL, buildAuthorizedHeaders, fetchWithTimeout, normalizeUsage, buildUpstreamHttpError } = require('./src/helpers');
 const { buildOpenAiRequest, getFittenCredentials, DEFAULT_MODEL } = require('./src/openai-request');
 const { buildToolCallsResponse, buildToolCall } = require('./src/tool-calling');
@@ -118,6 +118,13 @@ app.post('/v1/chat/completions', async (request, response) => {
           agentResult.toolCalls,
           normalizeUsage(fittenResult.events.find((e) => e && typeof e.usage === 'object')?.usage)
         ));
+      }
+
+      if (agentResult.hasToolIntent) {
+        throw createHttpError(502, 'upstream returned tool-calling content, but proxy could not convert it into standard OpenAI tool_calls format', {
+          type: 'server_error',
+          code: 'invalid_tool_call_output'
+        });
       }
 
       // 返回普通文本响应
@@ -421,6 +428,12 @@ async function pipeAgentStream(response, openaiRequest, upstreamResponse, client
       id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
       choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
     }));
+  } else if (agentResult.hasToolIntent) {
+    writeOpenAiStreamError(response, createHttpError(502, 'upstream returned tool-calling content, but proxy could not convert it into standard OpenAI tool_calls format', {
+      type: 'server_error',
+      code: 'invalid_tool_call_output'
+    }));
+    return;
   } else {
     // 发送普通文本响应
     writeSseEvent(response, JSON.stringify({

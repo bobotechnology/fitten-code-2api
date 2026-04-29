@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { normalizeModelToolOutput } = require('./helpers');
 
 // ============================================
 // XML Function Calling 支持
@@ -284,7 +285,7 @@ function parseSingleInvoke(invokeContent) {
   // Fitten Code 原生格式
   const args = {};
   for (const [key, value] of Object.entries(parameters)) {
-    args[key] = parseJSONWithRepair(value);
+    args[key] = parseJSONWithRepair(value, { logFailure: false });
   }
 
   return {
@@ -418,8 +419,16 @@ function decodeXMLEntities(text) {
 }
 
 // 尝试解析 JSON，失败时尝试修复
-function parseJSONWithRepair(value) {
+function parseJSONWithRepair(value, options = {}) {
   if (typeof value !== 'string') return value;
+
+  const shouldLogFailure = options.logFailure === true;
+
+  // 原生 invoke 的普通参数常常就是裸字符串，不应该把它当成异常。
+  // 这里只对明显像 JSON 的内容走严格解析，避免把 command=git status 打成错误日志。
+  if (!looksLikeJsonValue(value)) {
+    return value;
+  }
 
   // 先尝试直接解析
   try {
@@ -432,7 +441,7 @@ function parseJSONWithRepair(value) {
   let repaired = value;
 
   // 1. 处理未转义的换行符、回车符、制表符
-  // 只替换不在字符串值中的控制字符
+  // diff 一类长文本很容易夹带真实换行，这里不能直接放弃。
   repaired = repaired.replace(/(?<!\\)\n/g, '\\n');
   repaired = repaired.replace(/(?<!\\)\r/g, '\\r');
   repaired = repaired.replace(/(?<!\\)\t/g, '\\t');
@@ -444,11 +453,23 @@ function parseJSONWithRepair(value) {
   try {
     return JSON.parse(repaired);
   } catch {
-    // 修复失败，返回原始字符串
-    // 记录警告日志，方便调试
-    console.warn('[Agent Mode] JSON parse failed, returning raw string:', value.substring(0, 100));
+    if (shouldLogFailure) {
+      console.warn('[Agent Mode] JSON parse failed, returning raw string:', value.substring(0, 100));
+    }
     return value;
   }
+}
+
+function looksLikeJsonValue(value) {
+  if (typeof value !== 'string') return false;
+
+  const text = value.trim();
+  if (!text) return false;
+  if (text.startsWith('{') || text.startsWith('[') || text.startsWith('"')) return true;
+  if (text === 'null' || text === 'true' || text === 'false') return true;
+  if (/^-?\d+(?:\.\d+)?$/.test(text)) return true;
+
+  return false;
 }
 
 // 检测是否是工具调用格式
@@ -486,13 +507,15 @@ function validateToolArguments(args, toolDef) {
   const schema = toolDef.function?.parameters;
 
   if (!schema || typeof schema !== 'object') {
-    return { valid: true, errors: [] };
+    return { valid: true, errors: [], normalizedArgs: args };
   }
+
+  const normalizedArgs = removeOptionalNullFields(args, schema);
 
   // 检查 required 字段
   if (Array.isArray(schema.required)) {
     for (const reqField of schema.required) {
-      if (!(reqField in args)) {
+      if (!(reqField in normalizedArgs)) {
         errors.push(`缺少必需参数: ${reqField}`);
       }
     }
@@ -500,7 +523,7 @@ function validateToolArguments(args, toolDef) {
 
   // 检查每个参数的 type
   if (schema.properties && typeof schema.properties === 'object') {
-    for (const [key, value] of Object.entries(args)) {
+    for (const [key, value] of Object.entries(normalizedArgs)) {
       const propDef = schema.properties[key];
       if (!propDef) {
         // 检查 additionalProperties
@@ -510,7 +533,7 @@ function validateToolArguments(args, toolDef) {
         continue;
       }
 
-      // 校验类型
+      // 可选参数如果模型显式传 null，这里在前面已经删掉了，避免误伤。
       if (propDef.type) {
         const valid = validateType(value, propDef.type, propDef);
         if (!valid) {
@@ -518,7 +541,6 @@ function validateToolArguments(args, toolDef) {
         }
       }
 
-      // 校验 enum
       if (Array.isArray(propDef.enum)) {
         if (!propDef.enum.includes(value)) {
           errors.push(`参数 ${key} 值错误: 必须是 ${propDef.enum.join(' / ')} 之一`);
@@ -529,8 +551,24 @@ function validateToolArguments(args, toolDef) {
 
   return {
     valid: errors.length === 0,
-    errors
+    errors,
+    normalizedArgs
   };
+}
+
+function removeOptionalNullFields(args, schema) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return {};
+
+  const result = { ...args };
+  const requiredFields = Array.isArray(schema.required) ? schema.required : [];
+
+  for (const [key, value] of Object.entries(result)) {
+    const isRequired = requiredFields.includes(key);
+    if (value !== null || isRequired) continue;
+    delete result[key];
+  }
+
+  return result;
 }
 
 // 校验单个值的类型
@@ -555,15 +593,153 @@ function validateType(value, expectedType, propDef) {
   }
 }
 
+function parseToolCallsFromContent(content) {
+  const normalizedContent = normalizeModelToolOutput(content);
+  if (!normalizedContent) {
+    return {
+      normalizedContent: '',
+      toolCalls: null,
+      parseError: null,
+      hasToolIntent: false
+    };
+  }
+
+  const hasXmlToolIntent = isToolCallFormat(normalizedContent);
+
+  if (hasXmlToolIntent) {
+    const xmlToolCalls = parseAllToolCalls(normalizedContent);
+    if (xmlToolCalls?.length) {
+      return {
+        normalizedContent,
+        toolCalls: xmlToolCalls,
+        parseError: null,
+        hasToolIntent: true
+      };
+    }
+  }
+
+  const fallbackToolCalls = parsePseudoToolCalls(normalizedContent);
+  if (fallbackToolCalls?.length) {
+    return {
+      normalizedContent,
+      toolCalls: fallbackToolCalls,
+      parseError: null,
+      hasToolIntent: true
+    };
+  }
+
+  return {
+    normalizedContent,
+    toolCalls: null,
+    parseError: hasXmlToolIntent ? 'XML 解析失败' : null,
+    hasToolIntent: hasXmlToolIntent
+  };
+}
+
+function parsePseudoToolCalls(content) {
+  if (typeof content !== 'string') return null;
+
+  const toolCalls = [];
+  const lines = content.split('\n');
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const toolName = lines[index].trim();
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(toolName)) continue;
+
+    const nextLine = lines[index + 1]?.trim();
+    if (!nextLine || !nextLine.startsWith('{')) continue;
+
+    const jsonText = collectBalancedJsonBlock(lines.slice(index + 1).join('\n'));
+    if (!jsonText) continue;
+
+    const argumentsObject = parseJSONWithRepair(jsonText);
+    if (!argumentsObject || typeof argumentsObject !== 'object' || Array.isArray(argumentsObject)) continue;
+
+    toolCalls.push({
+      tool_name: toolName,
+      arguments: argumentsObject
+    });
+  }
+
+  return toolCalls.length ? toolCalls : null;
+}
+
+function collectBalancedJsonBlock(text) {
+  if (typeof text !== 'string') return '';
+
+  let depth = 0;
+  let isInString = false;
+  let isEscaped = false;
+  let startIndex = -1;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (startIndex === -1) {
+      if (char !== '{') continue;
+      startIndex = index;
+      depth = 1;
+      continue;
+    }
+
+    if (isEscaped) {
+      isEscaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      isEscaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      isInString = !isInString;
+      continue;
+    }
+
+    if (isInString) continue;
+
+    if (char === '{') depth += 1;
+    if (char === '}') depth -= 1;
+
+    if (depth === 0) {
+      return text.slice(startIndex, index + 1);
+    }
+  }
+
+  return '';
+}
+
+function buildOpenAiToolCall(toolCall, normalizedArgs) {
+  const argumentsObject = normalizedArgs || (
+    typeof toolCall.arguments === 'object' && toolCall.arguments !== null
+      ? toolCall.arguments
+      : parseJSONWithRepair(toolCall.arguments, { logFailure: true })
+  );
+
+  if (!argumentsObject || typeof argumentsObject !== 'object' || Array.isArray(argumentsObject)) {
+    throw new Error(`工具 ${toolCall.tool_name} 参数不是合法对象`);
+  }
+
+  return {
+    id: generateCallId(),
+    type: 'function',
+    function: {
+      name: toolCall.tool_name,
+      arguments: JSON.stringify(argumentsObject)
+    }
+  };
+}
+
 // 解析 Agent 响应（用于非流式）
 function parseAgentResponse(events, tools) {
   const result = {
     content: '',
     toolCalls: [],
-    parseError: null
+    parseError: null,
+    hasToolIntent: false
   };
 
-  // 收集所有内容
   let fullContent = '';
   for (const event of events) {
     if (typeof event.delta === 'string') {
@@ -571,63 +747,48 @@ function parseAgentResponse(events, tools) {
     }
   }
 
-  // 检查是否是工具调用格式
-  if (isToolCallFormat(fullContent)) {
-    // 解析所有工具调用（支持多个）
-    const allToolCalls = parseAllToolCalls(fullContent);
+  const parsed = parseToolCallsFromContent(fullContent);
+  result.hasToolIntent = parsed.hasToolIntent === true;
 
-    if (allToolCalls && allToolCalls.length > 0) {
-      const parseErrors = [];
+  if (!parsed.toolCalls?.length) {
+    result.parseError = parsed.parseError;
+    result.content = parsed.normalizedContent || fullContent;
+    return result;
+  }
 
-      for (const toolCall of allToolCalls) {
-        // 找到对应的工具定义
-        const toolDef = tools.find(t => t.function?.name === toolCall.tool_name);
-        if (!toolDef) {
-          parseErrors.push(`未知工具: ${toolCall.tool_name}`);
-          continue;
-        }
+  const parseErrors = [];
 
-        // 校验参数
-        const args = typeof toolCall.arguments === 'string'
-          ? toolCall.arguments
-          : JSON.stringify(toolCall.arguments);
-
-        const validation = validateToolArguments(
-          typeof toolCall.arguments === 'object' ? toolCall.arguments : JSON.parse(args),
-          toolDef
-        );
-
-        if (!validation.valid) {
-          parseErrors.push(`工具 ${toolCall.tool_name} 参数校验失败: ${validation.errors.join(', ')}`);
-          continue;
-        }
-
-        result.toolCalls.push({
-          id: generateCallId(),
-          type: 'function',
-          function: {
-            name: toolCall.tool_name,
-            arguments: args
-          }
-        });
-      }
-
-      // 如果有解析错误，记录但继续返回成功解析的工具
-      if (parseErrors.length > 0) {
-        result.parseError = parseErrors.join('; ');
-      }
-
-      // 如果没有成功解析任何工具，返回普通文本
-      if (result.toolCalls.length === 0) {
-        result.content = fullContent;
-      }
-    } else {
-      result.parseError = 'XML 解析失败';
-      result.content = fullContent;
+  for (const toolCall of parsed.toolCalls) {
+    const toolDef = tools.find((tool) => tool.function?.name === toolCall.tool_name);
+    if (!toolDef) {
+      parseErrors.push(`未知工具: ${toolCall.tool_name}`);
+      continue;
     }
-  } else {
-    // 普通文本响应
-    result.content = fullContent;
+
+    try {
+      const rawArguments = typeof toolCall.arguments === 'object' && toolCall.arguments !== null
+        ? toolCall.arguments
+        : parseJSONWithRepair(toolCall.arguments, { logFailure: true });
+
+      const validation = validateToolArguments(rawArguments, toolDef);
+      if (!validation.valid) {
+        parseErrors.push(`工具 ${toolCall.tool_name} 参数校验失败: ${validation.errors.join(', ')}`);
+        continue;
+      }
+
+      const openAiToolCall = buildOpenAiToolCall(toolCall, validation.normalizedArgs);
+      result.toolCalls.push(openAiToolCall);
+    } catch (error) {
+      parseErrors.push(`工具 ${toolCall.tool_name} 解析失败: ${error.message}`);
+    }
+  }
+
+  if (parseErrors.length > 0) {
+    result.parseError = parseErrors.join('; ');
+  }
+
+  if (result.toolCalls.length === 0) {
+    result.content = parsed.normalizedContent || fullContent;
   }
 
   return result;
@@ -641,5 +802,6 @@ module.exports = {
   isToolCallFormat,
   parseToolCallXML,
   parseAllToolCalls,
+  parsePseudoToolCalls,
   validateToolArguments
 };
