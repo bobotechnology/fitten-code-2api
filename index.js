@@ -64,6 +64,17 @@ app.post('/v1/chat/completions', async (request, response) => {
 
     const session = await getFittenSession(credentials, { forceLogin: false });
 
+    // 检查 session 是否有效
+    if (!session || !session.userId || !session.accessToken) {
+      return response.status(500).json({
+        error: {
+          message: 'Failed to get valid session, please check credentials',
+          type: 'server_error',
+          code: 'session_error'
+        }
+      });
+    }
+
     // 构建请求 payload
     let fittenPayload;
     if (openaiRequest.tools && openaiRequest.tools.length) {
@@ -93,6 +104,11 @@ app.post('/v1/chat/completions', async (request, response) => {
     // 有 tools 时解析 XML function calling
     if (openaiRequest.tools && openaiRequest.tools.length) {
       const agentResult = parseAgentResponse(fittenResult.events, openaiRequest.tools);
+
+      // 记录解析错误（如果有）
+      if (agentResult.parseError) {
+        console.error('[Agent Mode] Parse error:', agentResult.parseError);
+      }
 
       if (agentResult.toolCalls && agentResult.toolCalls.length > 0) {
         return response.json(buildToolCallsResponse(
@@ -233,6 +249,11 @@ async function sendChatStreamRequest(response, openaiRequest, session, payload, 
 // ============================================
 
 async function openChatRequest(session, payload, options = {}) {
+  // 防御性检查
+  if (!session || !session.userId || !session.accessToken) {
+    throw new Error('Invalid session: missing userId or accessToken');
+  }
+
   const requestBody = {
     inputs: payload.inputs,
     ft_token: session.userId
@@ -274,12 +295,40 @@ function buildOpenAiResponse(model, content, events) {
 // 工具函数
 // ============================================
 
+// 转义特殊标签，防止 prompt 注入
+function escapeFittenTags(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/<\|system\|>/gi, '&lt;|system|&gt;')
+    .replace(/<\|user\|>/gi, '&lt;|user|&gt;')
+    .replace(/<\|assistant\|>/gi, '&lt;|assistant|&gt;')
+    .replace(/<\|end\|>/gi, '&lt;|end|&gt;');
+}
+
+// 角色映射表：OpenAI 角色 -> Fitten Code 支持的角色
+const FITTEN_ROLE_MAPPING = {
+  'system': 'system',
+  'developer': 'system',
+  'user': 'user',
+  'assistant': 'assistant'
+};
+
+// 归一化角色到 Fitten Code 支持的角色
+function normalizeRole(role) {
+  if (typeof role !== 'string') return 'user';
+  const normalized = role.toLowerCase().trim();
+  return FITTEN_ROLE_MAPPING[normalized] || 'user';
+}
+
 function buildFittenInputs(messages) {
   return messages
     .map((m) => {
-      if (m.role === 'system') return `<|system|>\n${m.content}\n<|end|>`;
-      if (m.role === 'user') return `<|user|>\n${m.content}\n<|end|>`;
-      if (m.role === 'assistant') return `<|assistant|>\n${m.content}\n<|end|>`;
+      const safeContent = escapeFittenTags(m.content);
+      const role = normalizeRole(m.role);
+
+      if (role === 'system') return `<|system|>\n${safeContent}\n<|end|>`;
+      if (role === 'user') return `<|user|>\n${safeContent}\n<|end|>`;
+      if (role === 'assistant') return `<|assistant|>\n${safeContent}\n<|end|>`;
       return '';
     })
     .join('\n') + '\n<|assistant|>';
