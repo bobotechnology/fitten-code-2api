@@ -22,7 +22,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "test": "node --check index.js && node --check src/openai-request.js && node --check src/message-content.js && node --check src/streaming.js",
+    "test": "node --check index.js && node --check src/openai-request.js && node --check src/message-content.js && node --check src/streaming.js && node --check src/tool-calls.js && node --check src/inputs.js && node --check src/helpers.js && node --check src/fitten-payloads.js && node --check src/session.js && node --check src/errors.js && node --check src/parse-xml-tool-calls.js",
 
     "check:proxy": "node scripts/check-proxy.js",
     "check:stream": "node scripts/check-stream.js",

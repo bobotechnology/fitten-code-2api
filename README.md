@@ -345,14 +345,15 @@ npm run check:all
 ├─ README.md
 ├─ src/
 │  ├─ errors.js              公共错误
-│  ├─ fitten-meta.js         Fitten 元数据生成
-│  ├─ fitten-payloads.js     上游请求载荷构建
+│  ├─ fitten-payloads.js     上游请求载荷与元数据构建
 │  ├─ helpers.js             工具函数
+│  ├─ inputs.js              Fitten 输入格式与工具描述构建
 │  ├─ message-content.js     消息归一化与图片处理
 │  ├─ openai-request.js      OpenAI 请求解析
 │  ├─ parse-xml-tool-calls.js XML <function_calls> 解析器
 │  ├─ session.js             会话管理与 token 刷新
-│  └─ streaming.js           流式响应处理
+│  ├─ streaming.js           流式响应处理
+│  └─ tool-calls.js          OpenAI tool_calls 格式转换
 └─ scripts/
    └─ check-*.js             本地联调脚本
 ```

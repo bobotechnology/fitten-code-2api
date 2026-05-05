@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { normalizeError, createHttpError } = require('./errors');
 const { normalizeUsage, sanitizeAssistantContent } = require('./helpers');
+const { stripXmlToolCalls } = require('./parse-xml-tool-calls');
 
 function writeSseEvent(response, payload) {
   response.write(`data: ${payload}\n\n`);
@@ -81,7 +82,10 @@ function flushPendingContent(response, streamState, options = {}) {
   if (!force) return;
 
   streamState.sawContent = true;
-  writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, { content: streamState.pendingContent }, null)));
+  const cleanContent = stripXmlToolCalls(streamState.pendingContent);
+  if (cleanContent) {
+    writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, { content: cleanContent }, null)));
+  }
   streamState.pendingContent = '';
 }
 

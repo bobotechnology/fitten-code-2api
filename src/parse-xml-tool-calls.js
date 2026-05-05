@@ -412,12 +412,21 @@ function buildXmlToolCallText(text) {
 // 从 assistant 文本中剥离 XML / 方括号工具标签，只保留纯文本
 function stripXmlToolCalls(text) {
   if (typeof text !== 'string') return text || '';
-  return text
+
+  // 第 1 步：去掉容器标签
+  let result = text
     .replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, '')
     .replace(/<function_results>[\s\S]*?<\/function_results>/gi, '')
     .replace(/\[function_calls\][\s\S]*?\[\/function_calls\]/gi, '')
     .replace(/\[tool_calls\][\s\S]*?\[\/tool_calls\]/gi, '')
-    .trim();
+    .replace(/<invoke\s+tool_name="[^"]*"\s*>[\s\S]*?<\/invoke>/gi, '')
+    .replace(/<function_call\s*>[\s\S]*?<\/function_call>/gi, '');
+
+  // 第 2 步：去掉常见工具自闭合标签（如 <execute_command ... />）
+  // 这些标签通常在 <function_calls> 内部，但上一步可能只去掉了外层容器
+  result = result.replace(/<[a-z_][a-z0-9_-]*\b[^<>]*\/>/gi, '');
+
+  return result.trim();
 }
 
 // 检测文本是否包含 <function_results> 块
