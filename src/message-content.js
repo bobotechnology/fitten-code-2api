@@ -267,16 +267,20 @@ function buildMessageContentWithToolState(text, item) {
   const role = typeof item?.role === 'string' ? item.role.trim() : '';
 
   if (role === 'assistant') {
-    // 先处理 OpenAI 风格 tool_calls
+    // 如果 item 已经有标准 tool_calls，直接用它们构建 XML
+    // 不要从原始 text 里再提取，避免重复
     const openAiToolText = buildToolCallTextFromMessage(item);
+    if (openAiToolText) {
+      // 有标准 tool_calls 时，只保留纯文本内容（去掉 XML 标签）
+      const cleanText = hasFunctionCalls(text) ? stripXmlToolCalls(text) : text;
+      return mergeTextBlocks(cleanText, openAiToolText);
+    }
 
-    // 再检测 XML function_calls（上游模型可能返回 XML 格式）
+    // 没有标准 tool_calls 时，才从原始 text 检测 XML
     const xmlToolText = hasFunctionCalls(text) ? buildXmlToolCallText(text) : '';
-
-    // 如果检测到 XML，从文本中剥离 XML 标签
     const cleanText = hasFunctionCalls(text) ? stripXmlToolCalls(text) : text;
 
-    return mergeTextBlocks(mergeTextBlocks(cleanText, openAiToolText), xmlToolText);
+    return mergeTextBlocks(cleanText, xmlToolText);
   }
 
   if (role === 'tool') {
@@ -299,19 +303,29 @@ function buildToolCallTextFromMessage(item) {
 }
 
 function buildSingleToolCallText(toolCall) {
-  const lines = ['[tool_calls]'];
-  lines.push(`- id: ${toolCall.id}`);
-  lines.push(`- name: ${toolCall.name}`);
-  lines.push(`- arguments: ${toolCall.arguments}`);
-  return lines.join('\n');
+  // 用 Fitten 原生 XML 格式，避免模型学到 [tool_calls] 文本格式
+  let args = {};
+  try {
+    args = JSON.parse(toolCall.arguments);
+  } catch {
+    args = { raw: toolCall.arguments };
+  }
+
+  const attrs = Object.entries(args)
+    .map(([key, value]) => {
+      const val = typeof value === 'string' ? value.replace(/"/g, '&quot;') : JSON.stringify(value);
+      return `${key}="${val}"`;
+    })
+    .join(' ');
+
+  return `<function_calls>\n  <${toolCall.name} ${attrs} />\n</function_calls>`;
 }
 
 function buildToolResultText(item, text) {
-  const lines = ['[tool_result]'];
-  lines.push(`- tool_call_id: ${getNonEmptyString(item?.tool_call_id) || 'unknown'}`);
-  lines.push(`- name: ${getNonEmptyString(item?.name) || getNonEmptyString(item?.tool_name) || 'tool_result'}`);
-  if (text) lines.push(`- content: ${text}`);
-  return lines.join('\n').trim();
+  // 用 Fitten 原生 XML 格式
+  const name = getNonEmptyString(item?.name) || getNonEmptyString(item?.tool_name) || 'tool_result';
+  const content = text ? `\n  <result>${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</result>` : '';
+  return `<function_results>${content}\n</function_results>`;
 }
 
 function mergeTextBlocks(firstText, secondText) {
