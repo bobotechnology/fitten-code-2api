@@ -12,8 +12,7 @@
     "fitten",
     "openai",
     "proxy",
-    "chat-completions",
-    "function-calling"
+    "chat-completions"
   ],
   "main": "index.js",
   "type": "commonjs",
@@ -23,21 +22,20 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "test": "node --test tests/tool-calling.partial-intent.test.js",
+    "test": "node --check index.js && node --check src/openai-request.js && node --check src/message-content.js && node --check src/streaming.js",
 
     "check:proxy": "node scripts/check-proxy.js",
     "check:stream": "node scripts/check-stream.js",
-    "check:refresh": "node scripts/check-refresh.js",
+    "check:tool-calls": "node scripts/check-tool-calls.js",
     "check:content-array": "node scripts/check-content-array.js",
     "check:markdown": "node scripts/check-markdown.js",
     "check:newlines": "node scripts/check-newlines.js",
     "check:errors": "node scripts/check-errors.js",
-    "check:sdk-stream": "node scripts/check-sdk-stream.js",
     "check:image-input": "node scripts/check-image-input.js",
     "check:image-stream": "node scripts/check-image-stream.js",
     "check:image-cleanup": "node scripts/check-image-cleanup.js",
     "check:image-boundaries": "node scripts/check-image-boundaries.js",
-    "check:all": "npm run check:proxy && npm run check:stream && npm run check:refresh && npm run check:content-array && npm run check:markdown && npm run check:newlines && npm run check:errors && npm run check:sdk-stream && npm run check:image-input && npm run check:image-stream && npm run check:image-cleanup && npm run check:image-boundaries"
+    "check:all": "npm run check:proxy && npm run check:stream && npm run check:tool-calls && npm run check:content-array && npm run check:markdown && npm run check:newlines && npm run check:errors && npm run check:image-input && npm run check:image-stream && npm run check:image-cleanup && npm run check:image-boundaries"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

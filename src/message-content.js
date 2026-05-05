@@ -5,9 +5,11 @@ const {
   getNonEmptyString
 } = require('./helpers');
 const {
-  formatToolResultMessage,
-  formatAssistantToolCallsMessage
-} = require('./tool-calling');
+  hasFunctionCalls,
+  parseXmlToolCallsFromText,
+  buildXmlToolCallText,
+  stripXmlToolCalls
+} = require('./parse-xml-tool-calls');
 
 const MAX_IMAGE_BYTES = Number(process.env.MAX_IMAGE_BYTES || 5 * 1024 * 1024);
 
@@ -30,67 +32,42 @@ async function isValidMessage(item) {
   if (!item || typeof item !== 'object') return false;
   if (typeof item.role !== 'string') return false;
 
-  // assistant 消息带 tool_calls 时，content 可以为 null
-  if (item.role === 'assistant' && Array.isArray(item.tool_calls) && item.tool_calls.length) {
-    return true;
-  }
-
-  const content = await normalizeMessageContent(item.content);
+  const content = await normalizeMessageContent(item.content, item);
   return typeof content === 'string' && content.length > 0;
 }
 
 async function cleanMessage(item) {
-  const role = item.role.trim();
-
-  // tool 角色消息：把工具执行结果转成文本
-  if (role === 'tool') {
-    return {
-      role: 'user',
-      content: formatToolResultMessage(item)
-    };
-  }
-
-  // assistant 消息带 tool_calls：把工具调用转成文本
-  if (role === 'assistant' && Array.isArray(item.tool_calls) && item.tool_calls.length) {
-    const toolCallsText = formatAssistantToolCallsMessage(item);
-    const contentText = await normalizeMessageContent(item.content);
-    return {
-      role: 'assistant',
-      content: [toolCallsText, contentText].filter(Boolean).join('\n')
-    };
-  }
-
   return {
-    role,
-    content: await normalizeMessageContent(item.content)
+    role: item.role.trim(),
+    content: await normalizeMessageContent(item.content, item)
   };
 }
 
-async function normalizeMessageContent(content) {
+async function normalizeMessageContent(content, item = null) {
+  let text = '';
+
   if (typeof content === 'string') {
-    const normalized = content.trim();
-    return normalized || '';
-  }
-
-  if (!Array.isArray(content)) return '';
-
-  const parts = [];
-  let imageCount = 0;
-  for (const part of content) {
-    const normalizedPart = await normalizeContentPart(part);
-    if (!normalizedPart) continue;
-    if (normalizedPart.kind === 'image') imageCount += 1;
-    if (imageCount > 1) {
-      throw createHttpError(400, 'only one image is currently supported per message', {
-        type: 'invalid_request_error',
-        code: 'multiple_images_not_supported',
-        param: 'messages.content'
-      });
+    text = content.trim();
+  } else if (Array.isArray(content)) {
+    const parts = [];
+    let imageCount = 0;
+    for (const part of content) {
+      const normalizedPart = await normalizeContentPart(part);
+      if (!normalizedPart) continue;
+      if (normalizedPart.kind === 'image') imageCount += 1;
+      if (imageCount > 1) {
+        throw createHttpError(400, 'only one image is currently supported per message', {
+          type: 'invalid_request_error',
+          code: 'multiple_images_not_supported',
+          param: 'messages.content'
+        });
+      }
+      parts.push(normalizedPart);
     }
-    parts.push(normalizedPart);
+    text = buildStructuredMessageContent(parts);
   }
 
-  return buildStructuredMessageContent(parts);
+  return buildMessageContentWithToolState(text, item);
 }
 
 async function normalizeContentPart(part) {
@@ -284,6 +261,102 @@ function shouldSeparateContentParts(previousWhole, nextPart, previousPart) {
 
 function isMarkdownImage(value) {
   return typeof value === 'string' && /^!\[[^\]]*\]\((data:image\/[a-z0-9.+-]+;base64,[^)]+|https?:\/\/[^)]+)\)$/i.test(value);
+}
+
+function buildMessageContentWithToolState(text, item) {
+  const role = typeof item?.role === 'string' ? item.role.trim() : '';
+
+  if (role === 'assistant') {
+    // 先处理 OpenAI 风格 tool_calls
+    const openAiToolText = buildToolCallTextFromMessage(item);
+
+    // 再检测 XML function_calls（上游模型可能返回 XML 格式）
+    const xmlToolText = hasFunctionCalls(text) ? buildXmlToolCallText(text) : '';
+
+    // 如果检测到 XML，从文本中剥离 XML 标签
+    const cleanText = hasFunctionCalls(text) ? stripXmlToolCalls(text) : text;
+
+    return mergeTextBlocks(mergeTextBlocks(cleanText, openAiToolText), xmlToolText);
+  }
+
+  if (role === 'tool') {
+    return buildToolResultText(item, text);
+  }
+
+  return text || buildToolCallTextFromMessage(item);
+}
+
+function buildToolCallTextFromMessage(item) {
+  const toolCalls = getToolCallsFromMessage(item);
+  if (!toolCalls.length) return '';
+
+  const blocks = [];
+  for (const toolCall of toolCalls) {
+    blocks.push(buildSingleToolCallText(toolCall));
+  }
+
+  return blocks.join('\n\n').trim();
+}
+
+function buildSingleToolCallText(toolCall) {
+  const lines = ['[tool_calls]'];
+  lines.push(`- id: ${toolCall.id}`);
+  lines.push(`- name: ${toolCall.name}`);
+  lines.push(`- arguments: ${toolCall.arguments}`);
+  return lines.join('\n');
+}
+
+function buildToolResultText(item, text) {
+  const lines = ['[tool_result]'];
+  lines.push(`- tool_call_id: ${getNonEmptyString(item?.tool_call_id) || 'unknown'}`);
+  lines.push(`- name: ${getNonEmptyString(item?.name) || getNonEmptyString(item?.tool_name) || 'tool_result'}`);
+  if (text) lines.push(`- content: ${text}`);
+  return lines.join('\n').trim();
+}
+
+function mergeTextBlocks(firstText, secondText) {
+  if (firstText && secondText) return `${firstText}\n\n${secondText}`.trim();
+  return firstText || secondText || '';
+}
+
+function getToolCallsFromMessage(item) {
+  if (!item || typeof item !== 'object' || !Array.isArray(item.tool_calls)) return [];
+
+  const result = [];
+  for (const toolCall of item.tool_calls) {
+    const normalized = normalizeToolCall(toolCall);
+    if (normalized) result.push(normalized);
+  }
+
+  return result;
+}
+
+function normalizeToolCall(toolCall) {
+  if (!toolCall || typeof toolCall !== 'object') return null;
+
+  const toolFunction = toolCall.function && typeof toolCall.function === 'object'
+    ? toolCall.function
+    : {};
+
+  const id = getNonEmptyString(toolCall.id) || `tool_call_${Date.now()}`;
+  const name = getNonEmptyString(toolFunction.name) || getNonEmptyString(toolCall.name) || 'tool_call';
+  const argumentsText = normalizeToolCallArguments(toolFunction.arguments ?? toolCall.arguments);
+
+  return { id, name, arguments: argumentsText };
+}
+
+function normalizeToolCallArguments(value) {
+  if (typeof value === 'string') return value.trim() || '{}';
+  if (value && typeof value === 'object') return safeJsonStringify(value);
+  return '{}';
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '"[unserializable]"';
+  }
 }
 
 module.exports = {

@@ -9,15 +9,16 @@
 - 支持 SSE 流式响应
 - 支持 `messages[].content` 字符串与分段数组输入
 - 支持单张图片输入
-- 支持 tools / function calling（XML 格式）
+- 支持 tool_calls / function calling 协议转换（上游 XML `<function_calls>` → OpenAI 标准 `tool_calls`）
 - 统一错误结构，便于调用方处理
 
 ## 当前能力边界
 
-当前版本聚焦在聊天主链路：
-
-- 已支持：文本输入、流式输出、内容分段数组、单图输入、tools/function calling
+- 已支持：文本输入、流式输出、内容分段数组、单图输入
+- 已支持：上游 XML `<function_calls>` 自动转换为 OpenAI 标准 `tool_calls`（非流式 + 流式增量格式）
+- 已支持：请求体中的 `assistant.tool_calls` 与 `role: "tool"` 消息整理进聊天输入
 - 明确不支持：同一条消息中的多图输入
+- 暂未实现：代理自己发起并执行 tools / function calling（2api 只做协议转换，执行由接入方 agent 完成）
 - 暂未实现：embeddings 等扩展能力
 
 当同一条消息包含多张图片时，服务会返回：
@@ -141,7 +142,57 @@ Content-Type: application/json
 }
 ```
 
-### 3. 单图输入请求
+### 3. 带 tool_calls 的非流式请求
+
+```http
+POST /v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "fitten-code",
+  "messages": [
+    { "role": "system", "content": "你是助手" },
+    { "role": "user", "content": "帮我查一下当前目录" }
+  ],
+  "stream": false
+}
+```
+
+如果上游返回 XML `<function_calls>`，2api 会自动转成 OpenAI 标准 `tool_calls` 格式：
+
+```json
+{
+  "id": "chatcmpl-xxx",
+  "object": "chat.completion",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "我来帮你查一下。",
+      "tool_calls": [{
+        "index": 0,
+        "id": "xml_tool_call_xxx_0",
+        "type": "function",
+        "function": {
+          "name": "run_terminal",
+          "arguments": "{\"command\":\"ls -la\"}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
+}
+```
+
+### 4. 带 tool_calls 的流式请求
+
+流式请求同样支持 tool_calls 转换。当上游返回 XML `<function_calls>` 时，最后一个 SSE chunk 的 `finish_reason` 为 `tool_calls`，并包含 `tool_calls` 字段：
+
+```json
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"xml_tool_call_xxx_0","type":"function","function":{"name":"run_terminal","arguments":"{\"command\":\"ls -la\"}"}}]},"finish_reason":"tool_calls"}]}
+```
+
+### 5. 单图输入请求
 
 ```json
 {
@@ -215,111 +266,7 @@ Content-Type: application/json
 - 单张图片默认不超过 `5MB`
 - 非图片内容、空响应或不支持的协议会返回明确错误码
 
-## Tools / Function Calling
-
-本代理使用 XML 格式与 Fitten Code 进行 function calling 交互。
-
-### 工作原理
-
-1. 请求中携带 `tools` 参数时，代理会把工具定义转成 XML 格式注入 system prompt
-2. 模型决定调用工具时，输出 XML 格式的 `<function_calls>` 标签
-3. 代理解析 XML 输出，转换成标准 OpenAI `tool_calls` 格式返回
-
-### 请求示例
-
-```json
-{
-  "model": "fitten-code",
-  "messages": [
-    { "role": "user", "content": "北京今天天气怎么样？" }
-  ],
-  "tools": [
-    {
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "获取指定城市的天气信息",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "city": { "type": "string", "description": "城市名称" }
-          },
-          "required": ["city"]
-        }
-      }
-    }
-  ],
-  "tool_choice": "auto",
-  "stream": false
-}
-```
-
-`tool_choice` 支持以下取值：
-
-- `"auto"`：由模型决定是否调用工具（默认）
-- `"required"`：必须调用至少一个工具
-- `"none"`：不调用工具，等同普通对话
-- `{ "type": "function", "function": { "name": "..." } }`：强制调用指定工具
-
-### 响应示例
-
-当模型决定调用工具时，返回 `finish_reason: "tool_calls"`：
-
-```json
-{
-  "id": "chatcmpl-xxx",
-  "object": "chat.completion",
-  "created": 1710000000,
-  "model": "fitten-code",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": null,
-        "tool_calls": [
-          {
-            "id": "call_xxxxxxxxxxxxxxxxxxxxxxxx",
-            "type": "function",
-            "function": {
-              "name": "get_weather",
-              "arguments": "{\"city\":\"北京\"}"
-            }
-          }
-        ]
-      },
-      "finish_reason": "tool_calls"
-    }
-  ],
-  "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }
-}
-```
-
-### 回传工具结果
-
-拿到 `tool_calls` 后，调用方执行工具并把结果回传：
-
-```json
-{
-  "model": "fitten-code",
-  "messages": [
-    { "role": "user", "content": "北京今天天气怎么样？" },
-    { "role": "assistant", "content": null, "tool_calls": [
-      { "id": "call_xxx", "type": "function", "function": { "name": "get_weather", "arguments": "{\"city\":\"北京\"}" } }
-    ]},
-    { "role": "tool", "tool_call_id": "call_xxx", "content": "{\"temperature\": 25, \"condition\": \"晴\"}" }
-  ],
-  "stream": false
-}
-```
-
-### 注意事项
-
-- 这是 XML 格式模拟，可靠性取决于模型对指令的遵循程度
-- 流式模式下，代理会先收集完整输出再判断是否包含工具调用，因此首包延迟会比普通流式响应更高
-- `tool_choice: "none"` 等同于不传 `tools`，代理不会注入工具定义
-
-当前版本有意保持在较窄的兼容范围内，已知限制如下：
+当前版本已知限制如下：
 
 - 当前只实现 `GET /v1/models` 和 `POST /v1/chat/completions`
 - 默认会在缺失 system message 时自动补一条 `请完全使用中文回答。`
@@ -328,6 +275,7 @@ Content-Type: application/json
 - 不支持文件上传
 - 不支持跨实例共享会话缓存；当前 session cache 为进程内内存缓存
 - `scripts/check-*.js` 主要是本地联调脚本，不属于离线可重复的单元测试
+- 不支持代理自己发起和执行 tools / function calling（2api 只做协议转换，执行由接入方 agent 完成）
 
 ## 常见错误码
 
@@ -371,14 +319,20 @@ Content-Type: application/json
 
 ## 验证脚本
 
-仓库提供了一组本地联调脚本，主要用于回归聊天主链路、图片边界与性能表现。常用命令：
+仓库提供了一组本地联调脚本，主要用于回归聊天主链路、图片边界与 tool_calls 协议转换。常用命令：
 
 ```bash
+npm test
 npm run check:proxy
 npm run check:stream
+npm run check:tool-calls
 npm run check:image-boundaries
 npm run check:all
 ```
+
+其中 `npm test` 当前主要做基础语法检查，已经覆盖 [`index.js`](index.js:1)、[`src/openai-request.js`](src/openai-request.js:1)、[`src/message-content.js`](src/message-content.js:1) 和 [`src/streaming.js`](src/streaming.js:1)。
+
+[`npm run check:tool-calls`](package.json:29) 会验证 XML `<function_calls>` → OpenAI `tool_calls` 的协议转换，包括非流式响应组装和流式增量 chunk 格式。
 
 这些脚本依赖真实的 Fitten 凭据和外部网络环境，适合作为本地集成验证。
 
@@ -386,18 +340,19 @@ npm run check:all
 
 ```text
 .
-├─ index.js              入口：路由定义、请求重试与响应组装
+├─ index.js                  入口：路由定义、请求重试与响应组装
 ├─ package.json
 ├─ README.md
 ├─ src/
-│  ├─ agent-mode.js      XML Function Calling 支持
-│  ├─ errors.js          公共错误
-│  ├─ helpers.js         工具函数
-│  ├─ message-content.js 消息归一化与图片处理
-│  ├─ openai-request.js  OpenAI 请求解析
-│  ├─ session.js         会话管理与 token 刷新
-│  ├─ streaming.js       流式响应处理
-│  └─ tool-calling.js    Tool 响应构建
+│  ├─ errors.js              公共错误
+│  ├─ fitten-meta.js         Fitten 元数据生成
+│  ├─ fitten-payloads.js     上游请求载荷构建
+│  ├─ helpers.js             工具函数
+│  ├─ message-content.js     消息归一化与图片处理
+│  ├─ openai-request.js      OpenAI 请求解析
+│  ├─ parse-xml-tool-calls.js XML <function_calls> 解析器
+│  ├─ session.js             会话管理与 token 刷新
+│  └─ streaming.js           流式响应处理
 └─ scripts/
-   └─ check-*.js         本地联调脚本
+   └─ check-*.js             本地联调脚本
 ```

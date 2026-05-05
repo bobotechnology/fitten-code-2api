@@ -35,7 +35,10 @@ function beginOpenAiStream(response, model, options = {}) {
     includeUsage: options && options.include_usage === true,
     usage: undefined,
     sawContent: false,
-    pendingContent: ''
+    pendingContent: '',
+    accumulatedContent: '', // 完整累积内容，用于 finish 时检测 tool_calls
+    onComplete: typeof options.onComplete === 'function' ? options.onComplete : null,
+    toolCallDetector: typeof options.toolCallDetector === 'function' ? options.toolCallDetector : null
   };
 
   response.flushHeaders?.();
@@ -52,6 +55,7 @@ function writeOpenAiContentChunk(response, streamState, event) {
   if (!delta) return;
 
   streamState.pendingContent += delta;
+  streamState.accumulatedContent += delta;
   flushPendingContent(response, streamState, { force: shouldFlushStreamContent(streamState.pendingContent) });
 }
 
@@ -81,9 +85,21 @@ function flushPendingContent(response, streamState, options = {}) {
   streamState.pendingContent = '';
 }
 
-function finishOpenAiStream(response, streamState) {
+async function finishOpenAiStream(response, streamState) {
   flushPendingContent(response, streamState, { force: true });
-  writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, {}, 'stop')));
+
+  // 检测 XML function_calls 并转成 OpenAI tool_calls chunk
+  // 用 accumulatedContent（完整累积内容），因为 pendingContent 已被 flush 清空
+  const toolCalls = streamState.toolCallDetector
+    ? streamState.toolCallDetector(streamState.accumulatedContent)
+    : null;
+
+  if (toolCalls && toolCalls.length > 0) {
+    // 增量发送 tool_calls（OpenAI 标准格式）
+    writeToolCallsIncremental(response, streamState, toolCalls);
+  } else {
+    writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, {}, 'stop')));
+  }
 
   if (streamState.includeUsage && streamState.usage) {
     writeSseEvent(response, JSON.stringify({
@@ -98,6 +114,54 @@ function finishOpenAiStream(response, streamState) {
 
   writeSseEvent(response, '[DONE]');
   response.end();
+
+  if (streamState.onComplete) {
+    await streamState.onComplete(streamState.accumulatedContent);
+  }
+}
+
+// 增量发送 tool_calls（OpenAI 标准流式格式）
+// 每个 tool_call 分 3 步发送：
+//   1. {tool_calls: [{index, id, type}]}
+//   2. {tool_calls: [{index, function: {name}}]}
+//   3. {tool_calls: [{index, function: {arguments: "..."}}]}（可能分多个 fragment）
+function writeToolCallsIncremental(response, streamState, toolCalls) {
+  for (let index = 0; index < toolCalls.length; index += 1) {
+    const tc = toolCalls[index];
+
+    // 第 1 步：发送 id + type
+    writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, {
+      tool_calls: [{
+        index,
+        id: tc.id,
+        type: 'function'
+      }]
+    }, null)));
+
+    // 第 2 步：发送 function.name
+    writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, {
+      tool_calls: [{
+        index,
+        function: { name: tc.function.name }
+      }]
+    }, null)));
+
+    // 第 3 步：发送 function.arguments（分片发送，每片约 100 字符）
+    const argsText = tc.function.arguments;
+    const fragmentSize = 100;
+    for (let offset = 0; offset < argsText.length; offset += fragmentSize) {
+      const fragment = argsText.slice(offset, offset + fragmentSize);
+      writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, {
+        tool_calls: [{
+          index,
+          function: { arguments: fragment }
+        }]
+      }, null)));
+    }
+  }
+
+  // 最后：发送空 delta + finish_reason = "tool_calls"
+  writeSseEvent(response, JSON.stringify(buildChunk(streamState.id, streamState.created, streamState.model, {}, 'tool_calls')));
 }
 
 async function pipeFittenStreamAsOpenAi(response, model, upstreamResponse, options = {}, clientSignal) {
@@ -110,7 +174,15 @@ async function pipeFittenStreamAsOpenAi(response, model, upstreamResponse, optio
       if (clientSignal?.aborted) return;
       writeOpenAiContentChunk(response, streamState, event);
     }
-    if (!clientSignal?.aborted) finishOpenAiStream(response, streamState);
+    if (!clientSignal?.aborted) {
+      // 非 body 路径：手动设置 accumulatedContent
+      if (!streamState.accumulatedContent) {
+        streamState.accumulatedContent = events
+          .map((e) => (typeof e.delta === 'string' ? e.delta : ''))
+          .join('');
+      }
+      await finishOpenAiStream(response, streamState);
+    }
     return;
   }
 
@@ -144,7 +216,7 @@ async function pipeFittenStreamAsOpenAi(response, model, upstreamResponse, optio
       writeOpenAiContentChunk(response, streamState, parseFittenEventLine(trailing));
     }
 
-    if (!clientSignal?.aborted) finishOpenAiStream(response, streamState);
+    if (!clientSignal?.aborted) await finishOpenAiStream(response, streamState);
   } catch (error) {
     if (clientSignal?.aborted) return;
     if (!response.headersSent) {

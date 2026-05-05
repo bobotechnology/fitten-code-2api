@@ -2,13 +2,13 @@ require('dotenv').config({ quiet: true });
 
 const express = require('express');
 const crypto = require('crypto');
-const { normalizeError, createHttpError } = require('./src/errors');
+const { normalizeError } = require('./src/errors');
 const { FITTEN_BASE_URL, buildAuthorizedHeaders, fetchWithTimeout, normalizeUsage, buildUpstreamHttpError } = require('./src/helpers');
 const { buildOpenAiRequest, getFittenCredentials, DEFAULT_MODEL } = require('./src/openai-request');
-const { buildToolCallsResponse, buildToolCall } = require('./src/tool-calling');
-const { buildAgentPayload, parseAgentResponse } = require('./src/agent-mode');
 const { getFittenSession, clearCachedSession, ensureValidAccessToken, refreshSessionTokens, sessionCache } = require('./src/session');
-const { parseFittenEvents, pipeFittenStreamAsOpenAi, createClientAbortController, writeSseEvent, writeOpenAiStreamError } = require('./src/streaming');
+const { parseFittenEvents, pipeFittenStreamAsOpenAi, createClientAbortController, writeOpenAiStreamError } = require('./src/streaming');
+const { buildFittenChatPayload } = require('./src/fitten-payloads');
+const { parseXmlToolCallsFromText, hasFunctionCalls, stripXmlToolCalls, hasJsonToolCall, parseJsonToolCallsFromText } = require('./src/parse-xml-tool-calls');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -76,24 +76,9 @@ app.post('/v1/chat/completions', async (request, response) => {
     }
 
     // 构建请求 payload
-    let fittenPayload;
-    if (openaiRequest.tools && openaiRequest.tools.length) {
-      // 有 tools 时使用 XML function calling 格式
-      fittenPayload = buildAgentPayload(
-        openaiRequest.messages,
-        openaiRequest.tools,
-        session,
-        { sessionId: `session-${Date.now()}` }
-      );
-      fittenPayload.mode = 'agent';
-    } else {
-      // 无 tools 时普通请求
-      fittenPayload = {
-        inputs: buildFittenInputs(openaiRequest.messages),
-        ft_token: session.userId
-      };
-      fittenPayload.mode = 'chat';
-    }
+    const fittenPayload = buildFittenChatPayload(openaiRequest.messages, session, {
+      inputs: buildFittenInputs(openaiRequest.messages, openaiRequest.tools)
+    });
 
     if (openaiRequest.stream) {
       return await sendChatStreamWithRetry(response, openaiRequest, session, fittenPayload, credentials);
@@ -101,40 +86,11 @@ app.post('/v1/chat/completions', async (request, response) => {
 
     const fittenResult = await sendChatWithRetry(session, fittenPayload, credentials);
 
-    // 有 tools 时解析 XML function calling
-    if (openaiRequest.tools && openaiRequest.tools.length) {
-      const agentResult = parseAgentResponse(fittenResult.events, openaiRequest.tools);
-
-      // 记录解析错误（如果有）
-      if (agentResult.parseError) {
-        console.error('[Agent Mode] Parse error:', agentResult.parseError);
-      }
-
-      if (agentResult.toolCalls && agentResult.toolCalls.length > 0) {
-        return response.json(buildToolCallsResponse(
-          `chatcmpl-${crypto.randomUUID()}`,
-          Math.floor(Date.now() / 1000),
-          openaiRequest.model,
-          agentResult.toolCalls,
-          normalizeUsage(fittenResult.events.find((e) => e && typeof e.usage === 'object')?.usage)
-        ));
-      }
-
-      if (agentResult.hasToolIntent) {
-        throw createHttpError(502, 'upstream returned tool-calling content, but proxy could not convert it into standard OpenAI tool_calls format', {
-          type: 'server_error',
-          code: 'invalid_tool_call_output'
-        });
-      }
-
-      // 返回普通文本响应
-      return response.json(buildOpenAiResponse(openaiRequest.model, agentResult.content, fittenResult.events));
-    }
-
-    // 普通文本响应
+    // 拼接完整文本
     const content = fittenResult.events
       .map((event) => (typeof event.delta === 'string' ? event.delta : ''))
       .join('');
+
     return response.json(buildOpenAiResponse(openaiRequest.model, content, fittenResult.events));
 
   } catch (error) {
@@ -233,12 +189,24 @@ async function sendChatStreamRequest(response, openaiRequest, session, payload, 
       });
     }
 
-    // 有 tools 时使用 XML function calling 流式处理
-    if (payload.mode === 'agent' && openaiRequest.tools?.length) {
-      return await pipeAgentStream(response, openaiRequest, upstream, clientAbort.signal);
-    }
-
-    return await pipeFittenStreamAsOpenAi(response, openaiRequest.model, upstream, openaiRequest.stream_options, clientAbort.signal);
+    return await pipeFittenStreamAsOpenAi(
+      response,
+      openaiRequest.model,
+      upstream,
+      {
+        ...openaiRequest.stream_options,
+        // 检测 XML/JSON tool calls 并转成 OpenAI tool_calls
+        toolCallDetector(content) {
+          let toolCalls = hasFunctionCalls(content) ? parseXmlToolCallsFromText(content) : [];
+          if (toolCalls.length === 0 && hasJsonToolCall(content)) {
+            toolCalls = parseJsonToolCallsFromText(content);
+          }
+          if (!toolCalls.length) return null;
+          return buildOpenAiToolCalls(toolCalls);
+        }
+      },
+      clientAbort.signal
+    );
   } catch (error) {
     if (clientAbort.signal.aborted) return;
     if (response.headersSent) {
@@ -263,7 +231,8 @@ async function openChatRequest(session, payload, options = {}) {
 
   const requestBody = {
     inputs: payload.inputs,
-    ft_token: session.userId
+    ft_token: payload.ft_token || session.userId,
+    meta_datas: payload.meta_datas
   };
 
   return fetchWithTimeout(`${FITTEN_BASE_URL}/codeapi/chat_auth?apikey=${encodeURIComponent(session.userId)}`, {
@@ -281,8 +250,22 @@ async function openChatRequest(session, payload, options = {}) {
 // 响应构建
 // ============================================
 
+// 构建 OpenAI 兼容响应，自动检测 XML/JSON tool calls 并转成 tool_calls
 function buildOpenAiResponse(model, content, events) {
   const usageEvent = events.find((event) => event && typeof event.usage === 'object');
+
+  // 检测 XML <function_calls> 并转成 OpenAI tool_calls
+  let toolCalls = hasFunctionCalls(content) ? parseXmlToolCallsFromText(content) : [];
+
+  // 回退：检测 JSON 工具调用
+  if (toolCalls.length === 0 && hasJsonToolCall(content)) {
+    toolCalls = parseJsonToolCallsFromText(content);
+  }
+
+  const cleanContent = hasFunctionCalls(content) ? stripXmlToolCalls(content) : content;
+
+  const message = { role: 'assistant', content: cleanContent || '' };
+  if (toolCalls.length > 0) message.tool_calls = buildOpenAiToolCalls(toolCalls);
 
   return {
     id: `chatcmpl-${crypto.randomUUID()}`,
@@ -291,11 +274,24 @@ function buildOpenAiResponse(model, content, events) {
     model,
     choices: [{
       index: 0,
-      message: { role: 'assistant', content },
-      finish_reason: 'stop'
+      message,
+      finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop'
     }],
     usage: normalizeUsage(usageEvent?.usage)
   };
+}
+
+// 把 XML tool calls 转成 OpenAI 标准 tool_calls 格式
+function buildOpenAiToolCalls(toolCalls) {
+  return toolCalls.map((toolCall, index) => ({
+    index,
+    id: toolCall.id,
+    type: 'function',
+    function: {
+      name: toolCall.function.name,
+      arguments: JSON.stringify(toolCall.function.arguments)
+    }
+  }));
 }
 
 // ============================================
@@ -306,10 +302,10 @@ function buildOpenAiResponse(model, content, events) {
 function escapeFittenTags(text) {
   if (typeof text !== 'string') return '';
   return text
-    .replace(/<\|system\|>/gi, '&lt;|system|&gt;')
-    .replace(/<\|user\|>/gi, '&lt;|user|&gt;')
-    .replace(/<\|assistant\|>/gi, '&lt;|assistant|&gt;')
-    .replace(/<\|end\|>/gi, '&lt;|end|&gt;');
+    .replace(/<\|system\|>/gi, '<|system|>')
+    .replace(/<\|user\|>/gi, '<|user|>')
+    .replace(/<\|assistant\|>/gi, '<|assistant|>')
+    .replace(/<\|end\|>/gi, '<|end|>');
 }
 
 // 角色映射表：OpenAI 角色 -> Fitten Code 支持的角色
@@ -317,7 +313,8 @@ const FITTEN_ROLE_MAPPING = {
   'system': 'system',
   'developer': 'system',
   'user': 'user',
-  'assistant': 'assistant'
+  'assistant': 'assistant',
+  'tool': 'tool'
 };
 
 // 归一化角色到 Fitten Code 支持的角色
@@ -327,146 +324,115 @@ function normalizeRole(role) {
   return FITTEN_ROLE_MAPPING[normalized] || 'user';
 }
 
-function buildFittenInputs(messages) {
-  return messages
-    .map((m) => {
-      const safeContent = escapeFittenTags(m.content);
-      const role = normalizeRole(m.role);
+// 把 OpenAI tools 描述转成文本，注入到 system message 中
+// 让 Fitten 模型知道有哪些工具可用
+function buildFittenInputs(messages, tools) {
+  const toolDescriptions = buildToolDescriptions(tools);
+  const hasSystemMessage = messages.some((msg) => msg.role === 'system' || msg.role === 'developer');
 
-      if (role === 'system') return `<|system|>\n${safeContent}\n<|end|>`;
-      if (role === 'user') return `<|user|>\n${safeContent}\n<|end|>`;
-      if (role === 'assistant') return `<|assistant|>\n${safeContent}\n<|end|>`;
-      return '';
+  // 如果有 tools 但没有 system message，先注入一条空的 system message
+  let result = '';
+  if (toolDescriptions && !hasSystemMessage) {
+    result += `<|system|>\n${toolDescriptions}\n<|end|>\n`;
+  }
+
+  result += messages
+    .map((message) => {
+      // 如果是 system message 且有 tools，把工具描述追加到 system 内容后面
+      if (toolDescriptions && (message.role === 'system' || message.role === 'developer')) {
+        const safeContent = escapeFittenTags(message.content);
+        return `<|system|>\n${safeContent}\n\n${toolDescriptions}\n<|end|>`;
+      }
+      return buildFittenInputBlock(message);
     })
+    .filter(Boolean)
     .join('\n') + '\n<|assistant|>';
+
+  return result;
 }
 
-// ============================================
-// Agent 流式处理
-// ============================================
+// 把 OpenAI tools 数组转成文本描述
+// 注意：不包含 JSON schema，避免模型被带偏去输出 JSON
+function buildToolDescriptions(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) return null;
 
-async function pipeAgentStream(response, openaiRequest, upstreamResponse, clientSignal) {
-  const events = [];
-  let fullContent = '';
+  const lines = tools.map((tool, index) => {
+    const func = tool.function || {};
+    const name = func.name || `tool_${index}`;
+    const description = func.description || '';
+    const paramNames = extractParamNames(func.parameters);
 
-  if (!upstreamResponse.body) {
-    const text = await upstreamResponse.text();
-    const parsed = parseFittenEvents(text);
-    for (const event of parsed) {
-      if (clientSignal?.aborted) return;
-      if (typeof event.delta === 'string') fullContent += event.delta;
-      events.push(event);
-    }
-  } else {
-    const decoder = new TextDecoder();
-    const reader = upstreamResponse.body.getReader();
-    let buffer = '';
+    let text = `- ${name}`;
+    if (description) text += `: ${description}`;
+    if (paramNames) text += `\n  参数: ${paramNames}`;
+    return text;
+  });
 
-    try {
-      while (true) {
-        if (clientSignal?.aborted) return;
-        const { value, done } = await reader.read();
-        if (done) break;
+  return `你只能通过 XML <function_calls> 格式调用工具，绝不能输出 JSON 或纯文本描述。
 
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split(/\r?\n/);
-        buffer = parts.pop() || '';
+正确的调用格式（请严格遵循）：
+<function_calls>
+  <工具名 参数1="值1" 参数2="值2" />
+</function_calls>
 
-        for (const line of parts) {
-          if (clientSignal?.aborted) return;
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const event = parseFittenEventLine(trimmed);
-          if (typeof event.delta === 'string') fullContent += event.delta;
-          events.push(event);
-        }
-      }
+示例：
+<function_calls>
+  <execute_command command="ls -la" cwd="." />
+</function_calls>
 
-      if (buffer.trim()) {
-        const event = parseFittenEventLine(buffer.trim());
-        if (typeof event.delta === 'string') fullContent += event.delta;
-        events.push(event);
-      }
-    } finally {
-      reader.releaseLock();
-    }
+可用工具列表：
+${lines.join('\n')}`;
+}
+
+// 从 JSON schema 中提取参数名列表（不包含 schema 本身，避免模型被带偏）
+function extractParamNames(parameters) {
+  if (!parameters || typeof parameters !== 'object') return null;
+  const properties = parameters.properties;
+  if (!properties || typeof properties !== 'object') return null;
+  const names = Object.keys(properties);
+  if (names.length === 0) return null;
+  return names.join(', ');
+}
+
+function buildFittenInputBlock(message) {
+  const safeContent = escapeFittenTags(message.content);
+  const role = normalizeRole(message.role);
+
+  if (role === 'system') return `<|system|>\n${safeContent}\n<|end|>`;
+  if (role === 'user') return `<|user|>\n${safeContent}\n<|end|>`;
+  if (role === 'assistant') return `<|assistant|>\n${safeContent}\n<|end|>`;
+
+  // tool result：用 <function_results> XML 块包装，以 user 角色回传
+  // 让模型明确知道"这是工具执行结果"，而不是它自己的输出
+  if (role === 'tool') {
+    const toolResultXml = buildToolResultXml(message);
+    return `<|user|>\n${toolResultXml}\n<|end|>`;
   }
 
-  const agentResult = parseAgentResponse(events, openaiRequest.tools);
-  const id = `chatcmpl-${crypto.randomUUID()}`;
-  const created = Math.floor(Date.now() / 1000);
-  const includeUsage = openaiRequest.stream_options?.include_usage === true;
-  const usageEvent = events.find((e) => e && typeof e.usage === 'object');
+  return '';
+}
 
-  response.status(200);
-  response.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  response.setHeader('Cache-Control', 'no-cache, no-transform');
-  response.setHeader('Connection', 'keep-alive');
-  response.setHeader('X-Accel-Buffering', 'no');
-  response.flushHeaders?.();
+// 把 tool result 消息转成 <function_results> XML 格式
+function buildToolResultXml(message) {
+  const toolCallId = message.tool_call_id || 'unknown';
+  const name = message.name || message.tool_name || 'tool';
+  const content = message.content || '';
 
-  if (agentResult.toolCalls?.length) {
-    // 发送 tool_calls 响应
-    writeSseEvent(response, JSON.stringify({
-      id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
-      choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
-    }));
+  return `<function_results>
+<result tool_call_id="${escapeXmlAttr(toolCallId)}" tool_name="${escapeXmlAttr(name)}">
+${escapeFittenTags(content)}
+</result>
+</function_results>`;
+}
 
-    for (let i = 0; i < agentResult.toolCalls.length; i++) {
-      const tc = agentResult.toolCalls[i];
-      writeSseEvent(response, JSON.stringify({
-        id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
-        choices: [{
-          index: 0,
-          delta: { tool_calls: [{ index: i, id: tc.id, type: 'function', function: { name: tc.function.name, arguments: tc.function.arguments } }] },
-          finish_reason: null
-        }]
-      }));
-    }
-
-    writeSseEvent(response, JSON.stringify({
-      id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
-      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
-    }));
-  } else if (agentResult.hasToolIntent) {
-    writeOpenAiStreamError(response, createHttpError(502, 'upstream returned tool-calling content, but proxy could not convert it into standard OpenAI tool_calls format', {
-      type: 'server_error',
-      code: 'invalid_tool_call_output'
-    }));
-    return;
-  } else {
-    // 发送普通文本响应
-    writeSseEvent(response, JSON.stringify({
-      id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
-      choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
-    }));
-
-    const content = agentResult.content || fullContent;
-    const chunkSize = 20;
-    for (let i = 0; i < content.length; i += chunkSize) {
-      if (clientSignal?.aborted) return;
-      const chunk = content.slice(i, i + chunkSize);
-      writeSseEvent(response, JSON.stringify({
-        id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
-        choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }]
-      }));
-    }
-
-    writeSseEvent(response, JSON.stringify({
-      id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
-    }));
-  }
-
-  if (includeUsage && usageEvent) {
-    writeSseEvent(response, JSON.stringify({
-      id, object: 'chat.completion.chunk', created, model: openaiRequest.model,
-      choices: [], usage: normalizeUsage(usageEvent.usage)
-    }));
-  }
-
-  writeSseEvent(response, '[DONE]');
-  response.end();
+// 转义 XML 属性值中的特殊字符
+function escapeXmlAttr(value) {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/&/g, '&')
+    .replace(/"/g, '"')
+    .replace(/</g, '<')
+    .replace(/>/g, '>');
 }
 
 function parseFittenEventLine(line) {

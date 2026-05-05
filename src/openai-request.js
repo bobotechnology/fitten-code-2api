@@ -11,7 +11,6 @@ async function buildOpenAiRequest(body) {
   const stream = getStream(body);
   const streamOptions = getStreamOptions(body);
   const tools = getTools(body);
-  const toolChoice = getToolChoice(body);
 
   if (!model || !messages.length) return null;
 
@@ -20,9 +19,17 @@ async function buildOpenAiRequest(body) {
   if (typeof stream === 'boolean') result.stream = stream;
   if (streamOptions) result.stream_options = streamOptions;
   if (tools) result.tools = tools;
-  if (toolChoice !== undefined) result.tool_choice = toolChoice;
 
   return result;
+}
+
+// 提取 OpenAI 标准 tools 参数
+function getTools(body) {
+  if (!Array.isArray(body.tools) || body.tools.length === 0) return null;
+
+  // 只保留 function 类型的工具
+  const functionTools = body.tools.filter((tool) => tool && tool.type === 'function' && tool.function && tool.function.name);
+  return functionTools.length > 0 ? functionTools : null;
 }
 
 function getFittenCredentials() {
@@ -64,27 +71,6 @@ function getStreamOptions(body) {
   }
 
   return Object.keys(result).length ? result : undefined;
-}
-
-function getTools(body) {
-  if (!Array.isArray(body?.tools) || !body.tools.length) return undefined;
-
-  // 只保留 function 类型工具
-  const validTools = body.tools.filter(
-    (tool) => tool && tool.type === 'function' && tool.function && typeof tool.function.name === 'string'
-  );
-
-  return validTools.length ? validTools : undefined;
-}
-
-function getToolChoice(body) {
-  if (body?.tool_choice === undefined || body?.tool_choice === null) return undefined;
-
-  // "auto" | "none" | "required" | { type: "function", function: { name: "..." } }
-  if (typeof body.tool_choice === 'string') return body.tool_choice;
-  if (typeof body.tool_choice === 'object' && body.tool_choice.type) return body.tool_choice;
-
-  return undefined;
 }
 
 module.exports = {
