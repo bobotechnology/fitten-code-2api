@@ -22,7 +22,8 @@ function hasFunctionCalls(text) {
   if (typeof text !== 'string') return false;
   return /<function_calls>[\s\S]*?<\/function_calls>/i.test(text)
     || /\[function_calls\][\s\S]*?\[\/function_calls\]/i.test(text)
-    || /\[tool_calls\][\s\S]*?\[\/tool_calls\]/i.test(text);
+    || /\[tool_calls\][\s\S]*?\[\/tool_calls\]/i.test(text)
+    || /^\[tool_calls\]\s*\n[\s\S]*?- name:/im.test(text);
 }
 
 // 从文本中提取所有 function_calls / tool_calls 块
@@ -231,9 +232,9 @@ function normalizeXmlAttributeValue(value) {
   return value;
 }
 
-function buildToolCall(index, toolName, argumentsParsed) {
+function buildToolCall(index, toolName, argumentsParsed, customId) {
   return {
-    id: `xml_tool_call_${Date.now()}_${index}`,
+    id: customId || `xml_tool_call_${Date.now()}_${index}`,
     type: 'function',
     function: {
       name: toolName,
@@ -432,6 +433,48 @@ function extractFunctionResults(text) {
   return match ? match[1].trim() : '';
 }
 
+// 解析 [tool_calls] 文本格式（Roo Code 风格）
+// 格式示例：
+//   [tool_calls]
+//   - id: xxx
+//   - name: execute_command
+//   - arguments: {"command":"git status"}
+function parseTextToolCalls(text) {
+  if (typeof text !== 'string') return [];
+
+  const toolCalls = [];
+  const blockRegex = /^\[tool_calls\]\s*\n([\s\S]*?)(?=\n\[tool_calls\]|\n\[\/tool_calls\]|$)/gim;
+  let blockMatch;
+
+  while ((blockMatch = blockRegex.exec(text)) !== null) {
+    const block = blockMatch[1];
+    const id = extractTextToolCallField(block, 'id');
+    const name = extractTextToolCallField(block, 'name');
+    const argsText = extractTextToolCallField(block, 'arguments');
+
+    if (!name) continue;
+
+    let argsParsed = {};
+    if (argsText) {
+      try {
+        argsParsed = JSON.parse(argsText);
+      } catch {
+        argsParsed = { raw: argsText };
+      }
+    }
+
+    toolCalls.push(buildToolCall(toolCalls.length, name, argsParsed, id));
+  }
+
+  return toolCalls;
+}
+
+function extractTextToolCallField(block, fieldName) {
+  const regex = new RegExp(`^-\\s*${fieldName}\\s*:\\s*(.*)$`, 'im');
+  const match = block.match(regex);
+  return match ? match[1].trim() : '';
+}
+
 module.exports = {
   hasFunctionCalls,
   extractFunctionCallsBlocks,
@@ -442,5 +485,6 @@ module.exports = {
   hasFunctionResults,
   extractFunctionResults,
   hasJsonToolCall,
-  parseJsonToolCallsFromText
+  parseJsonToolCallsFromText,
+  parseTextToolCalls
 };

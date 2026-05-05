@@ -8,7 +8,7 @@ const { buildOpenAiRequest, getFittenCredentials, DEFAULT_MODEL } = require('./s
 const { getFittenSession, clearCachedSession, ensureValidAccessToken, refreshSessionTokens, sessionCache } = require('./src/session');
 const { parseFittenEvents, pipeFittenStreamAsOpenAi, createClientAbortController, writeOpenAiStreamError } = require('./src/streaming');
 const { buildFittenChatPayload } = require('./src/fitten-payloads');
-const { parseXmlToolCallsFromText, hasFunctionCalls, stripXmlToolCalls, hasJsonToolCall, parseJsonToolCallsFromText } = require('./src/parse-xml-tool-calls');
+const { parseXmlToolCallsFromText, hasFunctionCalls, stripXmlToolCalls, hasJsonToolCall, parseJsonToolCallsFromText, parseTextToolCalls } = require('./src/parse-xml-tool-calls');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -195,11 +195,14 @@ async function sendChatStreamRequest(response, openaiRequest, session, payload, 
       upstream,
       {
         ...openaiRequest.stream_options,
-        // 检测 XML/JSON tool calls 并转成 OpenAI tool_calls
+        // 检测 XML/JSON/text tool calls 并转成 OpenAI tool_calls
         toolCallDetector(content) {
           let toolCalls = hasFunctionCalls(content) ? parseXmlToolCallsFromText(content) : [];
           if (toolCalls.length === 0 && hasJsonToolCall(content)) {
             toolCalls = parseJsonToolCallsFromText(content);
+          }
+          if (toolCalls.length === 0) {
+            toolCalls = parseTextToolCalls(content);
           }
           if (!toolCalls.length) return null;
           return buildOpenAiToolCalls(toolCalls);
@@ -250,7 +253,7 @@ async function openChatRequest(session, payload, options = {}) {
 // 响应构建
 // ============================================
 
-// 构建 OpenAI 兼容响应，自动检测 XML/JSON tool calls 并转成 tool_calls
+// 构建 OpenAI 兼容响应，自动检测 XML/JSON/text tool calls 并转成 tool_calls
 function buildOpenAiResponse(model, content, events) {
   const usageEvent = events.find((event) => event && typeof event.usage === 'object');
 
@@ -260,6 +263,11 @@ function buildOpenAiResponse(model, content, events) {
   // 回退：检测 JSON 工具调用
   if (toolCalls.length === 0 && hasJsonToolCall(content)) {
     toolCalls = parseJsonToolCallsFromText(content);
+  }
+
+  // 回退：检测 [tool_calls] 文本格式（Roo Code 风格）
+  if (toolCalls.length === 0) {
+    toolCalls = parseTextToolCalls(content);
   }
 
   const cleanContent = hasFunctionCalls(content) ? stripXmlToolCalls(content) : content;
