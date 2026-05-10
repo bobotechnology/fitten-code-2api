@@ -276,11 +276,14 @@ function normalizeToolArguments(toolName, args) {
 
   const result = { ...args };
 
-  // ask_followup_question.follow_up 必须是合法 JSON 字符串
-  // 模型常把它输出成 XML 属性，解码后需要重新规范成 JSON 文本
+  // ask_followup_question.follow_up 必须是合法 JSON 数组/对象
+  // 模型常把它输出成 XML 属性（字符串），需要解析成对象让后续 JSON.stringify 正确序列化
   if (toolName === 'ask_followup_question' && typeof result.follow_up === 'string') {
-    const fixed = tryNormalizeJsonText(result.follow_up);
-    if (fixed) result.follow_up = fixed;
+    try {
+      result.follow_up = JSON.parse(result.follow_up);
+    } catch {
+      // parse 失败就保持原样
+    }
   }
 
   return result;
