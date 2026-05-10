@@ -53,6 +53,67 @@ npm start
 
 默认监听地址：`http://localhost:3000`
 
+## Docker 部署
+
+项目支持使用 Docker 容器化部署，镜像已发布到 GitHub Container Registry (GHCR)。
+
+### 从 GHCR 拉取并运行
+
+```bash
+# 拉取最新镜像
+docker pull ghcr.io/bobotechnology/fitten-code-2api:latest
+
+# 运行容器
+docker run -d \
+  --name fitten-api \
+  -p 3000:3000 \
+  -e FITTEN_USERNAME=your_username \
+  -e FITTEN_PASSWORD=your_password \
+  ghcr.io/bobotechnology/fitten-code-2api:latest
+```
+
+### 本地构建 Docker 镜像
+
+```bash
+# 构建镜像
+docker build -t fitten-code-2api .
+
+# 运行容器
+docker run -d \
+  --name fitten-api \
+  -p 3000:3000 \
+  -e FITTEN_USERNAME=your_username \
+  -e FITTEN_PASSWORD=your_password \
+  fitten-code-2api
+```
+
+### Docker Compose 部署（推荐）
+
+创建 `docker-compose.yml` 文件：
+
+```yaml
+version: '3.8'
+services:
+  fitten-api:
+    image: ghcr.io/bobotechnology/fitten-code-2api:latest
+    container_name: fitten-api
+    ports:
+      - "3000:3000"
+    environment:
+      - FITTEN_USERNAME=your_username
+      - FITTEN_PASSWORD=your_password
+      - PORT=3000
+    restart: unless-stopped
+```
+
+启动服务：
+
+```bash
+docker-compose up -d
+```
+
+**注意：** 运行容器时必须设置 `FITTEN_USERNAME` 和 `FITTEN_PASSWORD` 环境变量。
+
 ## Web UI 聊天界面
 
 项目内置了一个轻量级的 Web UI 聊天界面，启动服务后可以直接在浏览器中使用：
@@ -406,3 +467,66 @@ npm run check:all
 └─ scripts/
    └─ check-*.js             本地联调脚本
 ```
+
+## GitHub Actions CI/CD
+
+项目配置了自动化的 Docker 镜像构建和发布流程，使用 GitHub Actions 实现 CI/CD。
+
+### 工作流配置文件
+
+[`.github/workflows/docker.yml`](.github/workflows/docker.yml:1)
+
+### 触发条件
+
+- **推送到 `main` 分支**：自动构建并推送 Docker 镜像到 GHCR
+- **创建版本标签**（`v*`）：构建并打上版本号标签（如 `v1.0.0`, `v1.0`）
+- **Pull Request**：仅测试构建，不推送镜像
+
+### 构建特性
+
+- ✅ **多平台支持**：同时构建 `linux/amd64` 和 `linux/arm64` 架构镜像
+- ✅ **智能标签**：
+  - `latest` / `main`：最新版本
+  - `v1.0.0` / `v1.0`：语义化版本标签
+  - `abc1234`：Git SHA 短哈希
+- ✅ **构建缓存**：使用 GitHub Actions 缓存加速构建过程
+- ✅ **安全认证**：自动使用 `GITHUB_TOKEN` 登录 GHCR，无需手动配置凭据
+
+### 发布地址
+
+Docker 镜像发布到 **GitHub Container Registry (GHCR)**：
+
+```bash
+ghcr.io/bobotechnology/fitten-code-2api:<tag>
+```
+
+**可用标签示例：**
+- `ghcr.io/bobotechnology/fitten-code-2api:latest`
+- `ghcr.io/bobotechnology/fitten-code-2api:main`
+- `ghcr.io/bobotechnology/fitten-code-2api:v1.0.0`
+
+### 查看构建状态
+
+访问仓库的 Actions 页面查看构建历史和状态：
+
+```
+https://github.com/bobotechnology/fitten-code-2api/actions
+```
+
+### 手动触发版本发布
+
+```bash
+# 创建并推送版本标签，会自动触发带版本号的镜像构建
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+### 私有仓库访问
+
+如果仓库是私有的，拉取镜像需要先登录 GHCR：
+
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+```
+
+其中 `$GITHUB_TOKEN` 是你的 GitHub Personal Access Token（需要 `read:packages` 权限）。
