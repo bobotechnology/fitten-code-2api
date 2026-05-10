@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log*
+.env
+.git
+.gitignore
+README.md
+LICENSE
+.vscode
+.idea
+*.md
+scripts/
+test-assets/
