@@ -273,32 +273,41 @@ function decodeXmlEntities(value) {
 
 function normalizeToolArguments(toolName, args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  return deepNormalizeJsonStrings(args);
+}
 
-  const result = { ...args };
+function deepNormalizeJsonStrings(obj) {
+  if (obj === null || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(deepNormalizeJsonStrings);
 
-  // ask_followup_question.follow_up 必须是合法 JSON 数组/对象
-  // 模型常把它输出成 XML 属性（字符串），需要解析成对象让后续 JSON.stringify 正确序列化
-  if (toolName === 'ask_followup_question' && typeof result.follow_up === 'string') {
-    try {
-      result.follow_up = JSON.parse(result.follow_up);
-    } catch {
-      // parse 失败就保持原样
-    }
+  const result = {};
+  for (const [key, value] of Object.entries(obj)) {
+    result[key] = deepNormalizeJsonStrings(value);
   }
-
   return result;
 }
 
-function tryNormalizeJsonText(value) {
-  const text = String(value || '').trim();
-  if (!text) return value;
+function deepNormalizeJsonStrings(value) {
+  if (value === null || value === undefined) return value;
 
-  try {
-    const parsed = JSON.parse(text);
-    return JSON.stringify(parsed);
-  } catch {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && trimmed.length < 10000) {
+      try { return JSON.parse(trimmed); } catch { /* 不是合法JSON，保持原样 */ }
+    }
     return value;
   }
+
+  if (typeof value === 'object') {
+    if (Array.isArray(value)) return value.map(deepNormalizeJsonStrings);
+    const result = {};
+    for (const [k, v] of Object.entries(value)) {
+      result[k] = deepNormalizeJsonStrings(v);
+    }
+    return result;
+  }
+
+  return value;
 }
 
 function shouldSkipContainerTag(tagName) {
