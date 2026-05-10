@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fitten Code API</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='2' fill='%234ec9b0'/></svg>">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-brand">
+          <span class="sidebar-brand-icon"></span>
+          Fitten API
+        </div>
+        <button class="btn-new-chat" onclick="startNewChat()" title="新建对话">+</button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">对话记录</div>
+        <ul class="chat-list" id="chatList">
+          <li style="padding: 12px 16px; font-size: 11px; color: var(--text-muted); text-align: center;">暂无对话</li>
+        </ul>
+      </div>
+
+      <div class="sidebar-footer">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">已连接</span>
+      </div>
+    </aside>
+
+    <!-- Main Panel -->
+    <main class="main-panel">
+      <!-- Titlebar -->
+      <header class="titlebar">
+        <div class="titlebar-left">
+          <button class="menu-btn" onclick="toggleSidebar()">☰</button>
+          <div class="breadcrumb">
+            <span>对话</span>
+            <span class="breadcrumb-sep">/</span>
+            <span id="currentChatLabel">新建</span>
+          </div>
+        </div>
+        <div class="titlebar-right">
+          <span class="model-tag" id="modelTag">fitten-code</span>
+          <button class="icon-btn" onclick="toggleSettings()" title="设置">⚙</button>
+        </div>
+      </header>
+
+      <!-- Editor Container -->
+      <div class="editor-container" id="editorContainer">
+        <!-- Welcome View -->
+        <div class="welcome-view" id="welcomeView">
+          <div class="welcome-grid">
+            <h1 class="welcome-title">Fitten Code API</h1>
+            <p class="welcome-desc">基于 Fitten Code 的 OpenAI 兼容接口。开始对话或使用下方快捷操作。</p>
+            <div class="quick-actions">
+              <div class="quick-action" onclick="sendQuickPrompt('写一个 Python 排序函数')">
+                <span class="quick-action-key">⌘1</span>
+                <span class="quick-action-title">生成代码</span>
+                <span class="quick-action-hint">写一个 Python 排序函数</span>
+              </div>
+              <div class="quick-action" onclick="sendQuickPrompt('解释这段代码的作用')">
+                <span class="quick-action-key">⌘2</span>
+                <span class="quick-action-title">解释代码</span>
+                <span class="quick-action-hint">解释这段代码的作用</span>
+              </div>
+              <div class="quick-action" onclick="sendQuickPrompt('帮我修复这个错误')">
+                <span class="quick-action-key">⌘3</span>
+                <span class="quick-action-title">调试问题</span>
+                <span class="quick-action-hint">帮我修复这个错误</span>
+              </div>
+              <div class="quick-action" onclick="sendQuickPrompt('优化这段代码的性能')">
+                <span class="quick-action-key">⌘4</span>
+                <span class="quick-action-title">性能优化</span>
+                <span class="quick-action-hint">优化这段代码的性能</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Messages -->
+        <div class="messages-wrapper" id="messagesWrapper"></div>
+      </div>
+
+      <!-- Input Bar -->
+      <div class="input-bar">
+        <div class="input-inner">
+          <textarea
+            id="messageInput"
+            class="input-field"
+            placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
+            rows="1"
+            onkeydown="handleKey(event)"
+            oninput="onInput(this)"
+          ></textarea>
+          <button class="btn-send" id="sendBtn" onclick="sendMessage()" disabled>▶</button>
+        </div>
+        <div class="input-status">Fitten Code API · Enter 发送</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Settings Drawer -->
+  <div class="settings-backdrop" id="settingsBackdrop" onclick="toggleSettings()"></div>
+  <div class="settings-drawer" id="settingsDrawer">
+    <div class="drawer-header">
+      <span class="drawer-title">设置</span>
+      <button class="btn-close" onclick="toggleSettings()">✕</button>
+    </div>
+    <div class="drawer-body">
+      <div class="field-group">
+        <label class="field-label">API 地址</label>
+        <input type="text" id="apiUrlInput" class="field-input" placeholder="http://localhost:3000">
+      </div>
+      <div class="field-group">
+        <label class="field-label">API Key（可选）</label>
+        <input type="password" id="apiKeyInput" class="field-input" placeholder="如无需认证可留空">
+      </div>
+      <div class="field-group">
+        <label class="field-label">温度 (Temperature)</label>
+        <div class="field-range-wrap">
+          <input type="range" id="tempInput" class="field-range" min="0" max="2" step="0.1" value="0.7">
+          <span class="field-value" id="tempValue">0.7</span>
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">最大 Token 数</label>
+        <input type="number" id="maxTokensInput" class="field-input" value="4096" min="1" max="32000">
+      </div>
+    </div>
+    <div class="drawer-actions">
+      <button class="btn-secondary" onclick="testConnection()">测试</button>
+      <button class="btn-primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

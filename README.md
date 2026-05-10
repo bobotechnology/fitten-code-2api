@@ -5,6 +5,7 @@
 ## 特性
 
 - 提供 `/v1/models` 和 `/v1/chat/completions` 兼容接口
+- 内置 Web UI 聊天界面（访问 `http://localhost:3000` 即可使用）
 - 支持非流式响应
 - 支持 SSE 流式响应
 - 支持 `messages[].content` 字符串与分段数组输入
@@ -51,6 +52,18 @@ npm start
 ```
 
 默认监听地址：`http://localhost:3000`
+
+## Web UI 聊天界面
+
+项目内置了一个轻量级的 Web UI 聊天界面，启动服务后可以直接在浏览器中使用：
+
+- 访问地址：`http://localhost:3000`
+- 支持流式输出显示
+- 支持多轮对话
+- 支持设置 API 地址、API Key、温度参数等
+- 对话记录保存在浏览器本地存储
+
+适合快速测试和调试 API 接口，也可以作为简单的聊天客户端使用。
 
 ## 环境变量
 
@@ -326,13 +339,45 @@ npm test
 npm run check:proxy
 npm run check:stream
 npm run check:tool-calls
+npm run check:content-array
+npm run check:markdown
+npm run check:newlines
+npm run check:errors
+npm run check:image-input
+npm run check:image-stream
+npm run check:image-cleanup
 npm run check:image-boundaries
 npm run check:all
 ```
 
-其中 `npm test` 当前主要做基础语法检查，已经覆盖 [`index.js`](index.js:1)、[`src/openai-request.js`](src/openai-request.js:1)、[`src/message-content.js`](src/message-content.js:1) 和 [`src/streaming.js`](src/streaming.js:1)。
+其中 `npm test` 当前主要做基础语法检查，已经覆盖 [`index.js`](index.js:1)、[`src/openai-request.js`](src/openai-request.js:1)、[`src/message-content.js`](src/message-content.js:1)、[`src/streaming.js`](src/streaming.js:1)、[`src/tool-calls.js`](src/tool-calls.js:1)、[`src/inputs.js`](src/inputs.js:1)、[`src/helpers.js`](src/helpers.js:1)、[`src/fitten-payloads.js`](src/fitten-payloads.js:1)、[`src/session.js`](src/session.js:1)、[`src/errors.js`](src/errors.js:1) 和 [`src/parse-xml-tool-calls.js`](src/parse-xml-tool-calls.js:1)。
 
-[`npm run check:tool-calls`](package.json:29) 会验证 XML `<function_calls>` → OpenAI `tool_calls` 的协议转换，包括非流式响应组装和流式增量 chunk 格式。
+脚本分类说明：
+
+**基础功能测试：**
+- [`check-proxy.js`](scripts/check-proxy.js:1)：基础代理功能测试
+- [`check-stream.js`](scripts/check-stream.js:1)：流式输出测试
+- [`check-tool-calls.js`](scripts/check-tool-calls.js:1)：XML `<function_calls>` → OpenAI `tool_calls` 协议转换（非流式 + 流式）
+- [`check-content-array.js`](scripts/check-content-array.js:1)：内容分段数组输入测试
+- [`check-markdown.js`](scripts/check-markdown.js:1)：Markdown 格式处理测试
+- [`check-newlines.js`](scripts/check-newlines.js:1)：换行符处理测试
+- [`check-errors.js`](scripts/check-errors.js:1)：错误码测试
+
+**图片相关测试：**
+- [`check-image-input.js`](scripts/check-image-input.js:1)：单图输入测试
+- [`check-image-stream.js`](scripts/check-image-stream.js:1)：流式图片响应测试
+- [`check-image-cleanup.js`](scripts/check-image-cleanup.js:1)：图片清理逻辑测试
+- [`check-image-boundaries.js`](scripts/check-image-boundaries.js:1)：图片边界条件测试
+- [`check-image-size-limit.js`](scripts/check-image-size-limit.js:1)：图片大小限制测试
+- [`check-multi-image-rejected.js`](scripts/check-multi-image-rejected.js:1)：多图输入拒绝测试
+- [`check-invalid-image-data-url.js`](scripts/check-invalid-image-data-url.js:1）：无效 Base64 图片数据测试
+- [`check-unsupported-image-url.js`](scripts/check-unsupported-image-url.js:1）：不支持的 URL 格式测试
+
+**远程图片测试：**
+- [`check-remote-image.js`](scripts/check-remote-image.js:1）：远程图片拉取测试
+- [`check-remote-image-size-limit.js`](scripts/check-remote-image-size-limit.js:1）：远程图片大小限制测试
+- [`check-remote-image-not-image.js`](scripts/check-remote-image-not-image.js:1）：远程 URL 非图片内容测试
+- [`check-remote-image-empty.js`](scripts/check-remote-image-empty.js:1）：远程图片空响应测试
 
 这些脚本依赖真实的 Fitten 凭据和外部网络环境，适合作为本地集成验证。
 
@@ -343,6 +388,10 @@ npm run check:all
 ├─ index.js                  入口：路由定义、请求重试与响应组装
 ├─ package.json
 ├─ README.md
+├─ public/                   Web UI 聊天界面
+│  ├─ index.html             主页面
+│  ├─ app.js                 前端逻辑
+│  └─ style.css              样式文件
 ├─ src/
 │  ├─ errors.js              公共错误
 │  ├─ fitten-payloads.js     上游请求载荷与元数据构建

@@ -15,8 +15,24 @@ FittenTech.Fitten-Code-*/
 
 # 测试资源文件
 test-assets/
+test_req.json
 
 # 临时测试文件
 test-*.js
 tmp-*.js
 !test-agent-mode.js
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+desktop.ini
+
+# 临时文件
+*.tmp
+*.bak
+*.temp

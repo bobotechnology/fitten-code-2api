@@ -22,7 +22,7 @@ function buildOpenAiResponse(model, content, events) {
     toolCalls = parseTextToolCalls(content);
   }
 
-  const cleanContent = hasFunctionCalls(content) ? stripXmlToolCalls(content) : content;
+  const cleanContent = stripXmlToolCalls(content);
 
   const message = { role: 'assistant', content: cleanContent || '' };
   if (toolCalls.length > 0) message.tool_calls = buildOpenAiToolCalls(toolCalls);

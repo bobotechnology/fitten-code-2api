@@ -10,17 +10,17 @@ const { buildFittenChatPayload } = require('./src/fitten-payloads');
 const { buildOpenAiResponse, detectToolCalls } = require('./src/tool-calls');
 const { buildFittenInputs } = require('./src/inputs');
 
+const path = require('path');
+
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '20mb' }));
 
-// 根路由
+app.use(express.static(path.join(__dirname, 'public')));
+
 app.get('/', (request, response) => {
-  response.json({
-    message: 'fitten code 2api is running',
-    endpoints: ['/v1/models', '/v1/chat/completions']
-  });
+  response.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // 模型列表
