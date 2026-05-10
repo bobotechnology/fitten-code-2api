@@ -3,7 +3,7 @@
 一个将 Fitten Code 聊天请求转换为 OpenAI Chat Completions 风格接口的轻量代理服务。
 
 [![Docker Build and Push](https://github.com/bobotechnology/fitten-code-2api/actions/workflows/docker.yml/badge.svg)](https://github.com/bobotechnology/fitten-code-2api/actions/workflows/docker.yml)
-[![Docker Image Version (tag)](https://img.shields.io/docker/v/ghcr.io/bobotechnology/fitten-code-2api/latest?logo=docker&label=ghcr.io)](https://github.com/bobotechnology/fitten-code-2api/pkgs/container/fitten-code-2api)
+[![GHCR](https://img.shields.io/badge/ghcr.io-fitten--code--2api-blue?logo=docker&label=GHCR)](https://github.com/bobotechnology/fitten-code-2api/pkgs/container/fitten-code-2api)
 
 ## 特性
 
