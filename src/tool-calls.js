@@ -5,7 +5,9 @@ const {
   stripXmlToolCalls,
   hasJsonToolCall,
   parseJsonToolCallsFromText,
-  parseTextToolCalls
+  parseTextToolCalls,
+  hasStandaloneToolCallTags,
+  extractStandaloneToolCallTags
 } = require('./parse-xml-tool-calls');
 const { normalizeUsage } = require('./helpers');
 
@@ -20,6 +22,10 @@ function buildOpenAiResponse(model, content, events) {
 
   if (toolCalls.length === 0) {
     toolCalls = parseTextToolCalls(content);
+  }
+
+  if (toolCalls.length === 0 && hasStandaloneToolCallTags(content)) {
+    toolCalls = extractStandaloneToolCallTags(content);
   }
 
   const cleanContent = stripXmlToolCalls(content);
@@ -62,6 +68,10 @@ function detectToolCalls(content) {
 
   if (toolCalls.length === 0) {
     toolCalls = parseTextToolCalls(content);
+  }
+
+  if (toolCalls.length === 0 && hasStandaloneToolCallTags(content)) {
+    toolCalls = extractStandaloneToolCallTags(content);
   }
 
   if (!toolCalls.length) return null;

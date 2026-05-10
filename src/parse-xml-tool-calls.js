@@ -30,7 +30,35 @@ function hasFunctionCallOpenTag(text) {
   if (typeof text !== 'string') return false;
   return /<function_calls\s*>/i.test(text)
     || /\[function_calls\]/i.test(text)
-    || /\[tool_calls\]\s*$/m.test(text);
+    || /\[tool_calls\]\s*$/m.test(text)
+    || /<([a-z_][a-z0-9_-]*)\b[^<>]*question\s*=/i.test(text);
+}
+
+function hasStandaloneToolCallTags(text) {
+  if (typeof text !== 'string') return false;
+  return /<([a-z_][a-z0-9_-]*)\b[^<>]*\/>\s*$/i.test(text)
+    || /<([a-z_][a-z0-9_-]*)\b[^<>]*>[^<]*<\/\1>/i.test(text);
+}
+
+function extractStandaloneToolCallTags(text) {
+  if (typeof text !== 'string') return [];
+
+  const toolCalls = [];
+  const selfClosingRegex = /<([a-z_][a-z0-9_-]*)\b([^>]*)\/>/gi;
+  let match;
+
+  while ((match = selfClosingRegex.exec(text)) !== null) {
+    const tagName = match[1].trim();
+    const attrsText = match[2] || '';
+
+    if (shouldSkipContainerTag(tagName)) continue;
+    if (!/(?:question|command|path|file_path|content|url|query|text|follow_up)\s*=/i.test(attrsText)) continue;
+
+    const argumentsParsed = parseXmlAttributes(attrsText);
+    toolCalls.push(buildToolCall(toolCalls.length, tagName, argumentsParsed));
+  }
+
+  return toolCalls;
 }
 
 // 从文本中提取所有 function_calls / tool_calls 块
@@ -506,6 +534,8 @@ function extractTextToolCallField(block, fieldName) {
 module.exports = {
   hasFunctionCalls,
   hasFunctionCallOpenTag,
+  hasStandaloneToolCallTags,
+  extractStandaloneToolCallTags,
   extractFunctionCallsBlocks,
   parseFunctionCallsBlock,
   parseXmlToolCallsFromText,

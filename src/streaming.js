@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { normalizeError, createHttpError } = require('./errors');
 const { normalizeUsage, sanitizeAssistantContent } = require('./helpers');
-const { hasFunctionCallOpenTag, stripXmlToolCalls } = require('./parse-xml-tool-calls');
+const { hasFunctionCallOpenTag, hasStandaloneToolCallTags, stripXmlToolCalls } = require('./parse-xml-tool-calls');
 
 function writeSseEvent(response, payload) {
   response.write(`data: ${payload}\n\n`);
@@ -60,7 +60,7 @@ function emitContentDelta(response, streamState, delta) {
   streamState.accumulatedContent += delta;
   streamState.contentBuffer += delta;
 
-  if (!streamState.inToolCallMode && hasFunctionCallOpenTag(streamState.accumulatedContent)) {
+  if (!streamState.inToolCallMode && (hasFunctionCallOpenTag(streamState.accumulatedContent) || hasStandaloneToolCallTags(streamState.accumulatedContent))) {
     streamState.inToolCallMode = true;
     streamState.contentBuffer = '';
     return;
