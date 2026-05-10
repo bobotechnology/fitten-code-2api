@@ -26,6 +26,13 @@ function hasFunctionCalls(text) {
     || /^\[tool_calls\]\s*\n[\s\S]*?- name:/im.test(text);
 }
 
+function hasFunctionCallOpenTag(text) {
+  if (typeof text !== 'string') return false;
+  return /<function_calls\s*>/i.test(text)
+    || /\[function_calls\]/i.test(text)
+    || /\[tool_calls\]\s*$/m.test(text);
+}
+
 // 从文本中提取所有 function_calls / tool_calls 块
 function extractFunctionCallsBlocks(text) {
   if (typeof text !== 'string') return [];
@@ -486,6 +493,7 @@ function extractTextToolCallField(block, fieldName) {
 
 module.exports = {
   hasFunctionCalls,
+  hasFunctionCallOpenTag,
   extractFunctionCallsBlocks,
   parseFunctionCallsBlock,
   parseXmlToolCallsFromText,

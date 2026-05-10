@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { normalizeError, createHttpError } = require('./errors');
 const { normalizeUsage, sanitizeAssistantContent } = require('./helpers');
+const { hasFunctionCallOpenTag, stripXmlToolCalls } = require('./parse-xml-tool-calls');
 
 function writeSseEvent(response, payload) {
   response.write(`data: ${payload}\n\n`);
@@ -36,6 +37,8 @@ function beginOpenAiStream(response, model, options = {}) {
     usage: undefined,
     sawContent: false,
     accumulatedContent: '',
+    contentBuffer: '',
+    inToolCallMode: false,
     onComplete: typeof options.onComplete === 'function' ? options.onComplete : null,
     toolCallDetector: typeof options.toolCallDetector === 'function' ? options.toolCallDetector : null
   };
@@ -54,12 +57,31 @@ function normalizeStreamDelta(event) {
 function emitContentDelta(response, streamState, delta) {
   if (!delta) return;
 
-  streamState.sawContent = true;
   streamState.accumulatedContent += delta;
+  streamState.contentBuffer += delta;
 
-  writeSseEvent(response, JSON.stringify(
-    buildChunk(streamState.id, streamState.created, streamState.model, { content: delta }, null)
-  ));
+  if (!streamState.inToolCallMode && hasFunctionCallOpenTag(streamState.accumulatedContent)) {
+    streamState.inToolCallMode = true;
+    streamState.contentBuffer = '';
+    return;
+  }
+
+  if (streamState.inToolCallMode) {
+    streamState.contentBuffer = '';
+    return;
+  }
+
+  const shouldFlush = streamState.contentBuffer.length >= 40
+    || /\n/.test(streamState.contentBuffer)
+    || (streamState.contentBuffer.length > 5 && /[\.\!\?\。\！\？]\s*$/.test(streamState.contentBuffer));
+
+  if (shouldFlush && streamState.contentBuffer) {
+    streamState.sawContent = true;
+    writeSseEvent(response, JSON.stringify(
+      buildChunk(streamState.id, streamState.created, streamState.model, { content: streamState.contentBuffer }, null)
+    ));
+    streamState.contentBuffer = '';
+  }
 }
 
 function writeOpenAiContentChunk(response, streamState, event) {
@@ -72,6 +94,14 @@ function writeOpenAiContentChunk(response, streamState, event) {
 }
 
 async function finishOpenAiStream(response, streamState) {
+  if (streamState.contentBuffer && !streamState.inToolCallMode) {
+    streamState.sawContent = true;
+    writeSseEvent(response, JSON.stringify(
+      buildChunk(streamState.id, streamState.created, streamState.model, { content: streamState.contentBuffer }, null)
+    ));
+    streamState.contentBuffer = '';
+  }
+
   const toolCalls = streamState.toolCallDetector
     ? streamState.toolCallDetector(streamState.accumulatedContent)
     : null;
